@@ -404,9 +404,9 @@ def main(drop_and_create_db=False, drop_es_indices=False):
         # apply the patch
         active_git_branch = get_local_git_branch()
         print('Local git branch is : {}'.format(active_git_branch))
-        #apply_patch(remote_patch_file_path, REMOTE_PROJECT_DIR, active_git_branch)
-        #build_project()
-        #deploy_project()
+        apply_patch(remote_patch_file_path, REMOTE_PROJECT_DIR, active_git_branch)
+        build_project()
+        deploy_project()
         
         # Moves all log files to the logs directory
         move_files(predicate=lambda x: x.endswith('.log'), target_dir='./logs')
