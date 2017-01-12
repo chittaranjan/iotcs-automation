@@ -1,0 +1,14 @@
+__pycache__/
+*.egg-info
+*.log
+bin/
+lib
+lib/
+lib64
+lib64/
+include/
+logs/
+patch/
+pip-selfcheck.json
+pyvenv.cfg
+
