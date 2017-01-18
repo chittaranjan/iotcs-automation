@@ -39,14 +39,14 @@ Currently only supported on Linux machine and Python3
     
 ### "pip freeze" should output something like the below:
 
-cffi==1.9.1
-click==6.7
-cryptography==1.7.1
-idna==2.2
--e git+https://github.com/rahulpaul/iotcs-automation.git@4ab9b29f58b9bd9a635dedf9146337a0b47d477d#egg=iotcs_automation
-paramiko==2.1.1
-pyasn1==0.1.9
-pycparser==2.17
-requests==2.12.5
-six==1.10.0
+> cffi==1.9.1
+> click==6.7
+> cryptography==1.7.1
+> idna==2.2
+> -e git+https://github.com/rahulpaul/iotcs-automation.git@4ab9b29f58b9bd9a635dedf9146337a0b47d477d#egg=iotcs_automation
+> paramiko==2.1.1
+> pyasn1==0.1.9
+> pycparser==2.17
+> requests==2.12.5
+> six==1.10.0
 
