@@ -8,29 +8,75 @@ import paramiko
 import requests
 import click
 
-from io import StringIO
-from multiprocessing import Process, Semaphore
 from subprocess import Popen, PIPE
 from collections import OrderedDict
 
 
 # define the global variables
 
-SSH_CLIENT = None
-REMOTE_SERVER_HOST = None
-REMOTE_HOME = None
-REMOTE_PROJECT_DIR = None
-LOCAL_PROJECT_DIR = None
-ES_URL = None
-DB_CONNECT_STRING = None
-
-INTERVAL_SECS = 3
-
 PROXIES={'http':  'www-proxy.us.oracle.com',
          'https': 'www-proxy.us.oracle.com'}
 
 
-def run_command(command_as_list, cwd=None):
+class Config:
+    
+    remote_server_host = None
+    remote_home = None
+    remote_project_dir = None
+    local_project_dir = None
+    es_url = None
+    db_connect_string = None
+    
+    def __init__(self):
+        pass
+    
+    def __str__(self):
+        return """\{ remote_server_host = {}, remote_home = {}, remote_project_dir = {}, local_project_dir = {},
+                    es_url = {}, db_connect_str={} \}""".format(remote_server_host, remote_home, remote_project_dir, local_project_dir, es_url, db_connect_str)
+    
+
+class ESUtil:
+    
+    def __init__(self, es_url):
+        self.es_url = es_url
+    
+
+    def get_all_es_indices(self):
+        """ This returns the list of all ES indices"""
+        res = requests.get('{}/_cat/indices?v'.format(self.es_url), proxies=PROXIES)
+        if res.status_code != 200:
+            raise Exception('Failed to get list of ES indexes')
+        
+        lines = res.text.strip().split('\n')
+        lines = [' '.join(line.split()) for line in lines]
+        rows  = [line.split(' ') for line in lines]    
+        cn = rows[0].index('index')
+        return [row[cn] for i, row in enumerate(rows) if i > 0]
+
+
+    def delete_es_index(self, es_index):
+        """ This deletes the es index and returns a boolean value of True if successful else False"""
+        res = requests.delete('{}/{}'.format(self.es_url, es_index), proxies=PROXIES)
+        if res.status_code != 200:
+            raise Exception('Failed to delete es index {}, reason = {}'.format(es_index, res.json()['error']['type']))
+        return res.json()['acknowledged']
+    
+        
+    def delete_all_es_indices(self):
+        # get all es incides
+        print('#### Deleting all es indices with prefix "fm_" and "pm_" ####')
+        for es_index in self.get_all_es_indices():
+            if es_index.startswith('fm_') or es_index.startswith('pm_'):
+                try:
+                    if self.delete_es_index(es_index):
+                        print('#### Deleted ES index : {} ####'.format(es_index))
+                    else:
+                        print('#### Failed deletion of ES index : {} ####'.format(es_index))
+                except Exception as e:
+                    print('Exception deleting es index. ', e)
+
+
+def run_local_command(command_as_list, cwd=None):
     """
     Utility method to run any system commmand
     Returns the tuple (result, error)
@@ -52,71 +98,6 @@ def run_command(command_as_list, cwd=None):
     return result, error
 
 
-def run_sql_query(sql_command):
-    """
-    Utility method to run a SQL command using SQLPLUS program. So it assumes that SQLPLUS is installed in the local system
-    Returns the tuple (result, error)
-    
-    Arguments:
-    
-    sql_command -- e.g. 'SELECT * FROM FM_RULE_REACH_RECORD'
-    """
-    session = Popen(['sqlplus', '-S', DB_CONNECT_STRING], stdin=PIPE, stdout=PIPE, stderr=PIPE)
-    print('Connected to db: {}'.format(DB_CONNECT_STRING))
-    print('Executing command: {}'.format(sql_command))
-
-    start_time = time.time()
-    session.stdin.write((sql_command + '\n').encode())
-    session.stdin.flush()
-
-    result, error = session.communicate()    
-    print('Command execution completed in %.2f secs' % (time.time() - start_time))
-
-    if result:
-        result = result.decode()
-
-    if error:
-        error = error.decode()
-    
-    return result, error
-
-
-def copy_patch_to_remote_machine(filepath):
-    """
-    A Utility method to copy a file from the local machine to the remote / devops machine
-    
-    Arguments:
-    
-    filepath -- The path of the local file which is to be copied
-    remote_path -- The path on the remote / devops machine where the file is to be copied
-    """
-    with SSH_CLIENT.open_sftp() as sftp:
-        remote_dir = '{}/patch'.format(REMOTE_HOME)
-        
-        try:
-            # create the patch dir
-            sftp.mkdir(remote_dir)
-        except OSError:
-            pass
-        
-        filename = filepath.split('/')[-1]
-        remote_filepath = '{}/{}'.format(remote_dir, filename)
-        sftp.put(filepath, remote_filepath)
-        print('Copied patch file from {} to remote server location {}'.format(filepath, remote_filepath))
-        return remote_filepath
-        
-
-
-def apply_ssh_command(command):
-    """
-    A Utility method to run a ssh command on the remote / devops machine
-    Returns the exit status of the command
-    """
-    stdin, stdout, stderr = SSH_CLIENT.exec_command(command)
-    print_stream(stdout, stderr)
-    return stdout.channel.recv_exit_status()
-
-
 def print_stream(stdout, stderr):
     """
     A Utility method to print the standard output & standard error on the console
@@ -125,8 +106,6 @@ def print_stream(stdout, stderr):
         for line in iter(in_stream.readline, ''):
             print(line.rstrip(), file=out_stream)
     
-    #f(stdout, sys.stdout)
-    #f(stderr, sys.stderr)
     t1 = threading.Thread(target=f, args=(stdout, sys.stdout))
     t2 = threading.Thread(target=f, args=(stderr, sys.stderr))
     t1.start()
@@ -137,198 +116,200 @@ def print_stream(stdout, stderr):
     t2.join()
 
 
-def create_db():
+def run_ssh_command(ssh_client, command):
     """
-    Runs the dev-install.sql script against the remote / devops database server
+    A Utility method to run a ssh command on the remote / devops machine
+    Returns the exit status of the command
+    """
+    stdin, stdout, stderr = ssh_client.exec_command(command)
+    print_stream(stdout, stderr)
+    return stdout.channel.recv_exit_status()
+
+
+def create_db(ssh_client, config):
+    """
+    Runs the dev-install.sql script against the database server
     
     Returns a boolean value of True if successful else False
-    """    
-    sql_command = '@{}/Server/Scripts/dev-install.sql'.format(LOCAL_PROJECT_DIR)
-    result, error = run_sql_query(sql_command)
-
-    if result:
-        print('############ result ###########')
-        print(result)
-
-    if error:
-        print('############ error ###########')        
-        print(error)
-
-    is_successful = not error
-    return is_successful
+    """
+    sql_script = '{}/Server/Scripts/dev-install.sql'.format(config.remote_project_dir)
+    command = 'echo "@{}" | sqlplus {}'.format(sql_script, config.db_connect_string)
+    exit_code = run_ssh_command(ssh_client, command)
+    return exit_code >= 0
 
 
-def get_all_es_indices():
-    """ This returns the list of all ES indices"""
-    res = requests.get('{}/_cat/indices?v'.format(ES_URL), proxies=PROXIES)
-    if res.status_code != 200:
-        raise Exception('Failed to get list of ES indexes')
+class BuildUtil:
     
-    lines = res.text.strip().split('\n')
-    lines = [' '.join(line.split()) for line in lines]
-    rows  = [line.split(' ') for line in lines]    
-    cn = rows[0].index('index')
-    return [row[cn] for i, row in enumerate(rows) if i > 0]
-
-
-def delete_es_index(es_index):
-    """ This deletes the es index and returns a boolean value of True if successful else False"""
-    res = requests.delete('{}/{}'.format(ES_URL, es_index), proxies=PROXIES)
-    if res.status_code != 200:
-        raise Exception('Failed to delete es index {}, reason = {}'.format(es_index, res.json()['error']['type']))
-    return res.json()['acknowledged']
-
+    def __init__(self, config, ssh_client):
+        self.config = config
+        self.ssh_client = ssh_client
     
-def delete_all_es_indices():
-    # get all es incides
-    print('#### Deleting all es indices with prefix "fm_" and "pm_" ####')
-    for es_index in get_all_es_indices():
-        if es_index.startswith('fm_') or es_index.startswith('pm_'):
-            try:
-                if delete_es_index(es_index):
-                    print('#### Deleted ES index : {} ####'.format(es_index))
-                else:
-                    print('#### Failed deletion of ES index : {} ####'.format(es_index))
-            except Exception as e:
-                print('Exception deleting es index. ', e)
-
-
-def create_patch():
-    """
-    Creates a patch file for the local git project
-    Returns the patch of the patch file as a string
-    """
-    command = ['git', 'diff']
-    result, error = run_command(command, cwd=LOCAL_PROJECT_DIR)
-    if error:
-        print('############ error ###########')
-        print(error)
-        return None
-    if result:
-
-        try:
-            # create a patch directory here
-            os.mkdir('patch')
-        except FileExistsError:
-            pass
-        
-        patch_file = os.path.join('patch', 'iot-cs-{}.patch'.format(int(time.time())))
-        with open(patch_file, mode='w') as file:
-            file.write(result)
-        return patch_file
-
-
-def get_local_git_branch():
-    """
-    Returns the active branch of the local git project
-    """
-    command = ['git', 'branch']
-    result, error = run_command(command, cwd=LOCAL_PROJECT_DIR)
-    if result:
-        result = result.split('\n')
-        for line in result:
+    
+    def get_local_git_branch(self):
+        """
+        Returns the active branch of the local git project
+        """
+        command = ['git', 'branch']
+        result, error = run_local_command(command, cwd=self.config.local_project_dir)
+        if result:
+            result = result.split('\n')
+            for line in result:
+                if line.startswith('*'):
+                    return line[1:].strip()
+    
+    
+    def get_remote_git_branch(self):
+        """
+        Returns the active branch of the git project on the remote / devops machine
+        """
+        cd_command = 'cd {}'.format(self.config.remote_project_dir)
+        command = 'git branch'
+        stdin,stdout,stderr = self.ssh_client.exec_command(';'.join((cd_command, command)))
+        for line in stdout.readlines():
             if line.startswith('*'):
                 return line[1:].strip()
-
-
-def get_remote_git_branch():
-    """
-    Returns the active branch of the git project on the remote / devops machine
-    """
-    cd_command = 'cd {}'.format(REMOTE_PROJECT_DIR)
-    command = 'git branch'
-    stdin,stdout,stderr = SSH_CLIENT.exec_command(';'.join((cd_command, command)))
-    for line in stdout.readlines():
-        if line.startswith('*'):
-            return line[1:].strip()
-    raise Exception('Failed to get remote git branch')
-
-
-def apply_patch(patch_file, project_dir, git_branch):
-    cd_command = 'cd {}'.format(REMOTE_PROJECT_DIR)
-
-    # do git reset
-    command = 'git reset --hard'
-    exit_code = apply_ssh_command(';'.join((cd_command, command)))
-    if exit_code < 0:
-        raise Exception('Failed executing command: {}'.format(command))
-
-    # check if the current branch is not the target branch then checkout the target branch
-    current_git_branch = get_remote_git_branch()
-    print('Remote git branch is : {}'.format(current_git_branch))
+        raise Exception('Failed to get remote git branch')
     
-    if git_branch != current_git_branch:        
-        command = 'git checkout {}'.format(git_branch)
-        print(command)
-        exit_code = apply_ssh_command(';'.join((cd_command, command)))
+    
+    def create_patch(self):
+        """
+        Creates a patch file for the local git project
+        Returns the patch of the patch file as a string
+        """
+        command = ['git', 'diff']
+        result, error = run_local_command(command, cwd=self.config.local_project_dir)
+        if error:
+            print('############ error ###########')
+            print(error)
+            return None
+        if result:
+    
+            try:
+                # create a patch directory here
+                os.mkdir('patch')
+            except FileExistsError:
+                pass
+            
+            patch_file = os.path.join('patch', 'iot-cs-{}.patch'.format(int(time.time())))
+            with open(patch_file, mode='w') as file:
+                file.write(result)
+            return patch_file    
+    
+
+    def copy_patch_to_remote_machine(self, filepath):
+        """
+        A Utility method to copy a file from the local machine to the remote / devops machine
+        
+        Arguments:
+        
+        filepath -- The path of the local file which is to be copied
+        remote_path -- The path on the remote / devops machine where the file is to be copied
+        """
+        with self.ssh_client.open_sftp() as sftp:
+            remote_dir = '{}/patch'.format(self.config.remote_home)
+            
+            try:
+                # create the patch dir
+                sftp.mkdir(remote_dir)
+            except OSError:
+                pass
+            
+            filename = filepath.split('/')[-1]
+            remote_filepath = '{}/{}'.format(remote_dir, filename)
+            sftp.put(filepath, remote_filepath)
+            print('Copied patch file from {} to remote server location {}'.format(filepath, remote_filepath))
+            return remote_filepath
+
+
+    def apply_patch(self, patch_file, project_dir, git_branch):
+        cd_command = 'cd {}'.format(self.config.remote_project_dir)
+    
+        # do git reset
+        command = 'git reset --hard'
+        exit_code = run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
+        if exit_code < 0:
+            raise Exception('Failed executing command: {}'.format(command))   
+    
+        # check if the current branch is not the target branch then checkout the target branch
+        current_git_branch = self.get_remote_git_branch()
+        print('Remote git branch is : {}'.format(current_git_branch))
+        
+        if git_branch != current_git_branch:
+            # do a git pull
+            command = 'git pull'
+            exit_code = run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
+            
+            # checkout branch
+            command = 'git checkout {}'.format(git_branch)
+            print(command)
+            exit_code = run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
+            if exit_code < 0:
+                raise Exception('Failed executing command: {}'.format(command))
+    
+        # do a git pull
+        command = 'git pull'
+        exit_code = run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
+    
+        if patch_file:
+            # do git apply patch
+            print('Applying patch:\n======================')
+            command = 'git apply {}'.format(patch_file)
+            exit_code = run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
+            if exit_code:
+                raise Exception('Failed executing command: {}'.format(command))    
+
+
+    def build_project(self):
+        cd_command = 'cd {}'.format(self.config.remote_project_dir)
+        # do assemble prepareBundles
+        print('Building project:\n====================')
+        command = './gradlew assemble prepareBundles'
+        exit_code = run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
         if exit_code < 0:
             raise Exception('Failed executing command: {}'.format(command))
+        print('########## Build project completed Successfully #########')
 
-    # do a git pull
-    command = 'git pull'
-    exit_code = apply_ssh_command(';'.join((cd_command, command)))
 
-    if patch_file:
-        # do git apply patch
-        print('Applying patch:\n======================')
-        command = 'git apply {}'.format(patch_file)
-        exit_code = apply_ssh_command(';'.join((cd_command, command)))
-        if exit_code:
-            raise Exception('Failed executing command: {}'.format(command))
+    def deploy_project(self):
+        print('Deploy wars:\n========================')
+        # update the datasource.properties file
+        cwd = self.config.remote_project_dir + '/' + 'build/bundles/IoTServer'    
     
-
-
-def build_project():
-    cd_command = 'cd {}'.format(REMOTE_PROJECT_DIR)
-    # do assemble prepareBundles
-    print('Building project:\n====================')
-    command = './gradlew assemble prepareBundles'
-    exit_code = apply_ssh_command(';'.join((cd_command, command)))
-    if exit_code < 0:
-        raise Exception('Failed executing command: {}'.format(command))
-    print('########## Build project completed Successfully #########')
-
-
-def deploy_project():
-    print('Deploy wars:\n========================')
-    # update the datasource.properties file
-    cwd = REMOTE_PROJECT_DIR + '/' + 'build/bundles/IoTServer'    
-
-    with SSH_CLIENT.open_sftp() as sftp:        
-        sftp.chdir(cwd)
-        
-        if 'datasource.properties.backup' in sftp.listdir():
-            sftp.remove('datasource.properties.backup')
+        with self.ssh_client.open_sftp() as sftp:        
+            sftp.chdir(cwd)
             
-        properties = OrderedDict()
-        with sftp.open('datasource.properties', mode='r') as datasource_file:
-            for line in datasource_file:
-                line = line.strip()
-                if not line:
-                    continue
-                if line.startswith('#'):
-                    continue
-                t = line.split('=')
-                properties[t[0]] = t[1]
-        
-        properties['admin.port'] = '7001'
-        properties['admin.password'] = 'Welcome1'
-        
-        sftp.rename('datasource.properties', 'datasource.properties.backup')
-        
-        with sftp.open('datasource.properties', mode='w') as new_datasource_file:
-            for key in properties:
-                line = '{}={}'.format(key, properties[key])
-                new_datasource_file.write(line)
-                new_datasource_file.write('\n')
-
-    # run deploywars.sh
-    cd_command = 'cd {}'.format(cwd)
-    command = 'sh deploywars.sh'
-    exit_code = apply_ssh_command(';'.join((cd_command, command)))
-    if exit_code < 0:
-        raise Exception('Failed executing command: {}'.format(command))
-    print('########## deploywars completed Successfully #########')
+            if 'datasource.properties.backup' in sftp.listdir():
+                sftp.remove('datasource.properties.backup')
+                
+            properties = OrderedDict()
+            with sftp.open('datasource.properties', mode='r') as datasource_file:
+                for line in datasource_file:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line.startswith('#'):
+                        continue
+                    t = line.split('=')
+                    properties[t[0]] = t[1]
+            
+            properties['admin.port'] = '7001'
+            properties['admin.password'] = 'Welcome1'
+            
+            sftp.rename('datasource.properties', 'datasource.properties.backup')
+            
+            with sftp.open('datasource.properties', mode='w') as new_datasource_file:
+                for key in properties:
+                    line = '{}={}'.format(key, properties[key])
+                    new_datasource_file.write(line)
+                    new_datasource_file.write('\n')
+    
+        # run deploywars.sh
+        cd_command = 'cd {}'.format(cwd)
+        command = 'sh deploywars.sh'
+        exit_code = run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
+        if exit_code < 0:
+            raise Exception('Failed executing command: {}'.format(command))
+        print('########## deploywars completed Successfully #########')
 
 
 def move_files(predicate, target_dir):
@@ -350,75 +331,41 @@ def move_files(predicate, target_dir):
             os.rename(file, os.path.join(target_dir, file))
 
 
-def _perform_task(task, task_name, mutex):    
-    output, error = StringIO(), StringIO()
+def main(ssh_client, config, drop_and_create_db=False, drop_es_indices=False):
     
-    t1, t2 = sys.stdout, sys.stderr   
-    sys.stdout, sys.stderr = output, error    
-        
-    task()
-        
-    sys.stdout, sys.stderr = t1, t2
+    build_util = BuildUtil(config, ssh_client)
     
-    # wait for all other processes to finish before printing the output    
-    mutex.acquire()
-    try:
-        # sleep for 3 seconds to give a visual illusion of running process
-        print('############### {} output ################'.format(task_name))
-        time.sleep(INTERVAL_SECS)        
-        print_stream(output, error)
-    finally:
-        mutex.release()
+    patch_file = build_util.create_patch()
+    print('Patch file created = ', patch_file)
+    
+    remote_patch_file_path = None
+        
+    if patch_file:
+        # copy patch file to remote server            
+        remote_patch_file_path = build_util.copy_patch_to_remote_machine(patch_file)
+    else:
+        print('No git diff found')
 
-
-def main(drop_and_create_db=False, drop_es_indices=False):
-    # create the db
-    # this can take sometime, so do it in a separate process
+    # apply the patch
+    active_git_branch = build_util.get_local_git_branch()
+    print('Local git branch is : {}'.format(active_git_branch))
     
-    mutex = Semaphore(0)
-    
-    p1_name = 'DB drop and create'
-    p2_name = 'Drop ES indices'
-    p1 = Process(target=_perform_task, args=(create_db, p1_name, mutex)) if drop_and_create_db else None
-    p2 = Process(target=_perform_task, args=(delete_all_es_indices, p2_name, mutex)) if drop_es_indices else None    
-    
-    try:        
-        if p1:
-            p1.start()
-            print('#### Started process : {} ####'.format(p1_name))
+    build_util.apply_patch(remote_patch_file_path, config.remote_project_dir, active_git_branch)
+    build_util.build_project()
+    build_util.deploy_project()
         
-        if p2:
-            p2.start()
-            print('#### Started process : {} ####'.format(p2_name))        
+    if drop_and_create_db:
+        print('#### Running task to drop and create db ####')
+        create_db(ssh_client, config)
         
-        patch_file = create_patch()
-        print('Patch file = ', patch_file)
-        remote_patch_file_path = None
+    if drop_es_indices:
+        print('#### Running task to drop all ES indices ####')
+        es_util = ESUtil(config.es_url)
+        es_util.delete_all_es_indices()
         
-        if patch_file:
-            # copy patch file to remote server            
-            remote_patch_file_path = copy_patch_to_remote_machine(patch_file)
-        else:
-            print('No git diff found')
-
-        # apply the patch
-        active_git_branch = get_local_git_branch()
-        print('Local git branch is : {}'.format(active_git_branch))
-        apply_patch(remote_patch_file_path, REMOTE_PROJECT_DIR, active_git_branch)
-        build_project()
-        deploy_project()
+    # Moves all log files to the logs directory
+    move_files(predicate=lambda x: x.endswith('.log'), target_dir='./logs')    
         
-        # Moves all log files to the logs directory
-        move_files(predicate=lambda x: x.endswith('.log'), target_dir='./logs')
-    finally:
-        mutex.release()
-        if p1:
-            print('Wait for process : {} to complete'.format(p1_name))
-            p1.join()
-            
-        if p2:
-            print('Wait for process : {} to complete'.format(p2_name))
-            p2.join()
         
 
 @click.command()
@@ -435,41 +382,41 @@ def cli(remotehost, local_proj_dir, remote_proj_dir, db_url, es_url):
     Drop and create the database tables using dev-install.sql\n
     Drop the ES indexes    
     """
-    global REMOTE_SERVER_HOST, REMOTE_PROJECT_DIR, LOCAL_PROJECT_DIR, REMOTE_HOME, ES_URL, DB_CONNECT_STRING, SSH_CLIENT
-    print('Hello World!')
+        
+    config = Config()
+    config.remote_server_host = remotehost
+    config.local_project_dir = local_proj_dir
+    config.remote_project_dir = remote_proj_dir
+    config.es_url = es_url
+    config.db_connect_string = db_url    
+        
+    drop_and_create_db, drop_es_indices = bool(db_url), bool(es_url)    
     
-    REMOTE_SERVER_HOST = remotehost
-    LOCAL_PROJECT_DIR = local_proj_dir
-    REMOTE_PROJECT_DIR = remote_proj_dir
-    ES_URL = es_url
-    DB_CONNECT_STRING = db_url
-    
-    drop_and_create_db, drop_es_indices = bool(db_url), bool(es_url)
-    
-    click.echo('remote host : {}'.format(REMOTE_SERVER_HOST))
-    click.echo('local project directory : {}'.format(LOCAL_PROJECT_DIR))
-    click.echo('remote project directory : {}'.format(REMOTE_PROJECT_DIR))
-    click.echo('es_url : {}'.format(ES_URL))
-    click.echo('db_connect_string : {}'.format(DB_CONNECT_STRING))
     # get username and password of devops / remote machine
     username = getpass.getpass('Enter User: ')
     password = getpass.getpass('Enter Password for User {}: '.format(username))
     
-    REMOTE_HOME = os.path.join('/scratch', username)
-    click.echo('remote home : {}'.format(REMOTE_HOME))
+    config.remote_home = os.path.join('/scratch', username)
     
-    SSH_CLIENT = paramiko.SSHClient()
-    SSH_CLIENT.load_system_host_keys()
+    click.echo('remote host : {}'.format(config.remote_server_host))
+    click.echo('local project directory : {}'.format(config.local_project_dir))
+    click.echo('remote project directory : {}'.format(config.remote_project_dir))
+    click.echo('es_url : {}'.format(config.es_url))
+    click.echo('db_connect_string : {}'.format(config.db_connect_string))    
+    click.echo('remote home : {}'.format(config.remote_home))
+    
+    ssh_client = paramiko.SSHClient()
+    ssh_client.load_system_host_keys()
     
     try:
-        SSH_CLIENT.connect(REMOTE_SERVER_HOST, username=username, password=password)
-        click.echo('SSH connection established with remote host : {}'.format(REMOTE_SERVER_HOST))        
-        main(drop_and_create_db, drop_es_indices)
+        ssh_client.connect(config.remote_server_host, username=username, password=password)
+        click.echo('SSH connection established with remote host : {}'.format(config.remote_server_host))        
+        main(ssh_client, config, drop_and_create_db, drop_es_indices)
     except paramiko.SSHException as e1:
         click.echo('Connection Error: ', e1)
         raise e;
     except Exception as e2:
         click.echo('Failed with Error: ', e2)
     finally:
-        SSH_CLIENT.close()
+        ssh_client.close()
 
