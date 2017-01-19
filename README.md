@@ -16,12 +16,12 @@ Usage: iotcsautomation [OPTIONS]
   Drop the ES indexes
 
 Options:
-  --remotehost TEXT       The hostname of the target / remote machine
-  --local-proj-dir TEXT   The path to the iotcs project directory on the local machine
-  --remote-proj-dir TEXT  The path to the iotcs project directory on the remote machine
-  --db-url TEXT           The database connection url, if provided will run drop and create on the db
-  --es-url TEXT           The es connection url, if provided will drop all fm and pm indexes
-  --help                  Show this message and exit.
+  - --remotehost TEXT       The hostname of the target / remote machine
+  - --local-proj-dir TEXT   The path to the iotcs project directory on the local machine
+  - --remote-proj-dir TEXT  The path to the iotcs project directory on the remote machine
+  - --db-url TEXT           The database connection url, if provided will run drop and create on the db
+  - --es-url TEXT           The es connection url, if provided will drop all fm and pm indexes
+  - --help                  Show this message and exit.
 
 
 ### Installation
