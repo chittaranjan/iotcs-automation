@@ -36,6 +36,7 @@ Currently only supported on Linux machine and Python3
 6. upgrade pip => pip install --upgrade pip
 7. install the project => pip install --editable .
 8. verify everything was installed correctly => pip freeze
+9. verify that iotcsautomation was installed => iotcsautomation --help
     
 ### "pip freeze" should output something like the below:
 
