@@ -132,7 +132,7 @@ def create_db(ssh_client, config):
     
     Returns a boolean value of True if successful else False
     """
-    sql_script = '{}/Server/Scripts/install/dev-install.sql'.format(config.remote_project_dir)
+    sql_script = '{}/Server/Scripts/dev-install.sql'.format(config.remote_project_dir)
     command = 'echo "@{}" | sqlplus {}'.format(sql_script, config.db_connect_string)
     exit_code = run_ssh_command(ssh_client, command)
     return exit_code >= 0
