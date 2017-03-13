@@ -121,9 +121,13 @@ def run_ssh_command(ssh_client, command):
     A Utility method to run a ssh command on the remote / devops machine
     Returns the exit status of the command
     """
+    print('##### ssh command : {} #####'.format(command))
     stdin, stdout, stderr = ssh_client.exec_command(command)
     print_stream(stdout, stderr)
-    return stdout.channel.recv_exit_status()
+    exit_code = stdout.channel.recv_exit_status()
+    if exit_code != 0:
+        # command execution failed
+        raise Exception('Error executing ssh command, exit code: {}'.format(exit_code))
 
 
 def create_db(ssh_client, config):
@@ -132,10 +136,10 @@ def create_db(ssh_client, config):
     
     Returns a boolean value of True if successful else False
     """
-    sql_script = '{}/Server/Scripts/install/dev-install.sql'.format(config.remote_project_dir)
-    command = 'echo "@{}" | sqlplus {}'.format(sql_script, config.db_connect_string)
-    exit_code = run_ssh_command(ssh_client, command)
-    return exit_code >= 0
+    cd_command = 'cd {}/Server/Scripts/install'.format(config.remote_project_dir)
+    sql_script = 'dev-install.sql'
+    command = ';'.join((cd_command, 'echo "@{}" | sqlplus {}'.format(sql_script, config.db_connect_string)))
+    run_ssh_command(ssh_client, command)    
 
 
 class BuildUtil:
@@ -143,7 +147,6 @@ class BuildUtil:
     def __init__(self, config, ssh_client):
         self.config = config
         self.ssh_client = ssh_client
-    
     
     def get_local_git_branch(self):
         """
@@ -157,7 +160,6 @@ class BuildUtil:
                 if line.startswith('*'):
                     return line[1:].strip()
     
-    
     def get_remote_git_branch(self):
         """
         Returns the active branch of the git project on the remote / devops machine
@@ -169,7 +171,6 @@ class BuildUtil:
             if line.startswith('*'):
                 return line[1:].strip()
         raise Exception('Failed to get remote git branch')
-    
     
     def create_patch(self):
         """
@@ -194,7 +195,6 @@ class BuildUtil:
             with open(patch_file, mode='w') as file:
                 file.write(result)
             return patch_file    
-    
 
     def copy_patch_to_remote_machine(self, filepath):
         """
@@ -220,15 +220,12 @@ class BuildUtil:
             print('Copied patch file from {} to remote server location {}'.format(filepath, remote_filepath))
             return remote_filepath
 
-
     def apply_patch(self, patch_file, project_dir, git_branch):
         cd_command = 'cd {}'.format(self.config.remote_project_dir)
     
         # do git reset
         command = 'git reset --hard'
-        exit_code = run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
-        if exit_code < 0:
-            raise Exception('Failed executing command: {}'.format(command))   
+        run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))           
     
         # check if the current branch is not the target branch then checkout the target branch
         current_git_branch = self.get_remote_git_branch()
@@ -237,38 +234,29 @@ class BuildUtil:
         if git_branch != current_git_branch:
             # do a git pull
             command = 'git pull'
-            exit_code = run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
+            run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
             
             # checkout branch
             command = 'git checkout {}'.format(git_branch)
-            print(command)
-            exit_code = run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
-            if exit_code < 0:
-                raise Exception('Failed executing command: {}'.format(command))
+            run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
     
         # do a git pull
         command = 'git pull'
-        exit_code = run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
+        run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
     
         if patch_file:
             # do git apply patch
             print('Applying patch:\n======================')
             command = 'git apply {}'.format(patch_file)
-            exit_code = run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
-            if exit_code:
-                raise Exception('Failed executing command: {}'.format(command))    
-
+            run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))    
 
     def build_project(self):
         cd_command = 'cd {}'.format(self.config.remote_project_dir)
         # do assemble prepareBundles
         print('Building project:\n====================')
         command = './gradlew assemble prepareBundles'
-        exit_code = run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
-        if exit_code < 0:
-            raise Exception('Failed executing command: {}'.format(command))
+        run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
         print('########## Build project completed Successfully #########')
-
 
     def deploy_project(self):
         print('Deploy wars:\n========================')
@@ -306,9 +294,7 @@ class BuildUtil:
         # run deploywars.sh
         cd_command = 'cd {}'.format(cwd)
         command = 'sh deploywars.sh'
-        exit_code = run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
-        if exit_code < 0:
-            raise Exception('Failed executing command: {}'.format(command))
+        run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
         print('########## deploywars completed Successfully #########')
 
 
@@ -351,8 +337,7 @@ def main(ssh_client, config, drop_and_create_db=False, drop_es_indices=False):
     print('Local git branch is : {}'.format(active_git_branch))
     
     build_util.apply_patch(remote_patch_file_path, config.remote_project_dir, active_git_branch)
-    build_util.build_project()
-    build_util.deploy_project()
+    build_util.build_project()    
         
     if drop_and_create_db:
         print('#### Running task to drop and create db ####')
@@ -362,7 +347,9 @@ def main(ssh_client, config, drop_and_create_db=False, drop_es_indices=False):
         print('#### Running task to drop all ES indices ####')
         es_util = ESUtil(config.es_url)
         es_util.delete_all_es_indices()
-        
+
+    build_util.deploy_project()
+    
     # Moves all log files to the logs directory
     move_files(predicate=lambda x: x.endswith('.log'), target_dir='./logs')    
         
