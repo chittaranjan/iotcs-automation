@@ -116,12 +116,16 @@ def print_stream(stdout, stderr):
     t2.join()
 
 
-def run_ssh_command(ssh_client, command):
+def run_ssh_command(ssh_client, command, command_dir='.'):
     """
     A Utility method to run a ssh command on the remote / devops machine
     Returns the exit status of the command
     """
-    print('##### ssh command : {} #####'.format(command))
+    print('##### \nssh command : {} \n#####'.format(command))
+    if '.' != command_dir:
+        cd_command = 'cd {}'.format(command_dir)
+        command = ';'.join((cd_command, command))
+
     stdin, stdout, stderr = ssh_client.exec_command(command)
     print_stream(stdout, stderr)
     exit_code = stdout.channel.recv_exit_status()
@@ -136,10 +140,10 @@ def create_db(ssh_client, config):
     
     Returns a boolean value of True if successful else False
     """
-    cd_command = 'cd {}/Server/Scripts/install'.format(config.remote_project_dir)
+    command_dir = '{}/Server/Scripts/install'.format(config.remote_project_dir)
     sql_script = 'dev-install.sql'
-    command = ';'.join((cd_command, 'echo "@{}" | sqlplus {}'.format(sql_script, config.db_connect_string)))
-    run_ssh_command(ssh_client, command)    
+    command = 'echo "@{}" | sqlplus {}'.format(sql_script, config.db_connect_string)
+    run_ssh_command(ssh_client, command, command_dir)    
 
 
 class BuildUtil:
@@ -221,11 +225,9 @@ class BuildUtil:
             return remote_filepath
 
     def apply_patch(self, patch_file, project_dir, git_branch):
-        cd_command = 'cd {}'.format(self.config.remote_project_dir)
-    
         # do git reset
         command = 'git reset --hard'
-        run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))           
+        run_ssh_command(self.ssh_client, command, self.config.remote_project_dir)           
     
         # check if the current branch is not the target branch then checkout the target branch
         current_git_branch = self.get_remote_git_branch()
@@ -234,28 +236,27 @@ class BuildUtil:
         if git_branch != current_git_branch:
             # do a git pull
             command = 'git pull'
-            run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
+            run_ssh_command(self.ssh_client, command, self.config.remote_project_dir)
             
             # checkout branch
             command = 'git checkout {}'.format(git_branch)
-            run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
+            run_ssh_command(self.ssh_client, commmand, self.config.remote_project_dir)
     
         # do a git pull
         command = 'git pull'
-        run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
+        run_ssh_command(self.ssh_client, command, self.config.remote_project_dir)
     
         if patch_file:
             # do git apply patch
             print('Applying patch:\n======================')
             command = 'git apply {}'.format(patch_file)
-            run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))    
+            run_ssh_command(self.ssh_client, command, self.config.remote_project_dir)    
 
-    def build_project(self):
-        cd_command = 'cd {}'.format(self.config.remote_project_dir)
+    def build_project(self):        
         # do assemble prepareBundles
         print('Building project:\n====================')
         command = './gradlew assemble prepareBundles'
-        run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
+        run_ssh_command(self.ssh_client, command, self.config.remote_project_dir)
         print('########## Build project completed Successfully #########')
 
     def deploy_project(self):
@@ -291,10 +292,9 @@ class BuildUtil:
                     new_datasource_file.write(line)
                     new_datasource_file.write('\n')
     
-        # run deploywars.sh
-        cd_command = 'cd {}'.format(cwd)
+        # run deploywars.sh        
         command = 'sh deploywars.sh'
-        run_ssh_command(self.ssh_client, ';'.join((cd_command, command)))
+        run_ssh_command(self.ssh_client, command, cwd)
         print('########## deploywars completed Successfully #########')
 
 
